@@ -8,6 +8,7 @@ from src.utils import Dataset
 import torch
 import numpy as np
 from src.binidx import MMapIndexedDataset
+import pickle
 
 np.set_printoptions(precision=4, suppress=True, linewidth=200)
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -22,26 +23,16 @@ logging.basicConfig(format="%(asctime)s - %(levelname)s - %(name)s - %(message)s
 # Step 1: set training data & cfg
 ########################################################################################################
 
-EXPRESS_PILE_MODE = False # True: express mode for fine-tuning a pile model // False: usual training
+EXPRESS_PILE_MODE = True # True: express mode for fine-tuning a pile model // False: usual training
 
-EXPRESS_PILE_MODEL_NAME = 'RWKV-4-Pile-169M-20220807-8023'
-EXPRESS_PILE_MODEL_TYPE = 'RWKV-4-Pile-169M'
-# EXPRESS_PILE_MODEL_NAME = 'RWKV-4-Pile-430M-20220808-8066'
-# EXPRESS_PILE_MODEL_TYPE = 'RWKV-4-Pile-430M'
+# EXPRESS_PILE_MODEL_NAME = 'RWKV-4-Pile-169M-20220807-8023'
+# EXPRESS_PILE_MODEL_TYPE = 'RWKV-4-Pile-169M'
+EXPRESS_PILE_MODEL_NAME = 'RWKV-4-Pile-430M-20220808-8066'
+EXPRESS_PILE_MODEL_TYPE = 'RWKV-4-Pile-430M'
 # EXPRESS_PILE_MODEL_NAME = 'RWKV-4-Pile-1B5-20220903-8040'
 # EXPRESS_PILE_MODEL_TYPE = 'RWKV-4-Pile-1B5'
 
 ########################################################################################################
-
-datafile = "../data/enwik8" # your data
-datafile_encoding = 'utf-8' # 'utf-8' / 'utf-16le' / 'numpy' (for fine-tuning pile models) / 'binidx' (the Megatron-LM 'binidx' format)
-
-# datafile = 'my-gpt_seq_document'
-# datafile_encoding = 'binidx'
-
-if EXPRESS_PILE_MODE:
-    datafile = 'train.npy' # use 'prepare-data.py' in https://github.com/BlinkDL/RWKV-v2-RNN-Pile/tree/main/RWKV-v3 to tokenize .txt into .npy
-    datafile_encoding = 'numpy'
 
 #
 # set VOCAB_SIZE = 0 (auto-compute) if you are training a char-level LM from scratch
@@ -67,23 +58,23 @@ os.environ['RWKV_NUM_GPUS'] = '1' # num of GPUs to use
 # 'fp32' (!!!very slow!!! only for verification)
 os.environ['RWKV_FLOAT_MODE'] = 'bf16'
 
-os.environ['RWKV_DEEPSPEED'] = '1' # Use DeepSpeed? 0 = False, 1 = True
+os.environ['RWKV_DEEPSPEED'] = '0' # Use DeepSpeed? 0 = False, 1 = True
 
 if int(os.environ['RWKV_NUM_GPUS']) == 1: # Usually you don't need DeepSpeed for 1 GPU training.
     os.environ['RWKV_DEEPSPEED'] = '0'    # However, sometimes DeepSpeed saves VRAM even for 1 GPU training. So you shall try it.
 
-os.environ['USE_WANDB'] = '0' # wandb logging. 0 = False, 1 = True
+os.environ['USE_WANDB'] = '1' # wandb logging. 0 = False, 1 = True
 
 ########################################################################################################
 # Step 2: set model details
 ########################################################################################################
 
 EPOCH_BEGIN = 0 # begins with miniEpoch = EPOCH_BEGIN
-LOAD_MODEL = False # shall we load the #EPOCH_BEGIN model and continue the training from it?
+LOAD_MODEL = True # shall we load the #EPOCH_BEGIN model and continue the training from it?
 
 n_layer = 6
 n_embd = 512
-ctx_len = 1024 # increase T_MAX in src/model.py if your ctx_len is longer
+ctx_len = 2048 # increase T_MAX in src/model.py if your ctx_len is longer
 
 model_type = 'RWKV' # 'RWKV' or 'RWKV-ffnPre' (sometimes better)
 
@@ -96,11 +87,11 @@ if EXPRESS_PILE_MODE:
     if EXPRESS_PILE_MODEL_TYPE == 'RWKV-4-Pile-169M':
         n_layer = 12
         n_embd = 768
-        ctx_len = 1024
+        ctx_len = ctx_len
     elif EXPRESS_PILE_MODEL_TYPE == 'RWKV-4-Pile-430M':
         n_layer = 24
         n_embd = 1024
-        ctx_len = 1024
+        ctx_len = ctx_len
     elif EXPRESS_PILE_MODEL_TYPE == 'RWKV-4-Pile-1B5':
         n_layer = 24
         n_embd = 2048
@@ -111,7 +102,7 @@ if EXPRESS_PILE_MODE:
 ########################################################################################################
 
 # if you see "CUDA out of memory", reduce batch_size. Use nvidia-smi to find the highest value for your GPU.
-batch_size = 12 * int(os.environ['RWKV_NUM_GPUS'])
+batch_size = 6 * int(os.environ['RWKV_NUM_GPUS'])
 assert (batch_size % int(os.environ['RWKV_NUM_GPUS']) == 0)
 
 # By default we are using exponential LR decay.
@@ -124,15 +115,15 @@ assert (batch_size % int(os.environ['RWKV_NUM_GPUS']) == 0)
 # 
 # For L12-D768, set lr_init = 6e-4. For L24-D1024, set lr_init = 4e-4. For L24-D2048, set lr_init = 3e-4.
 
-lr_init = 8e-4
-lr_final = 1e-5
+lr_init = 1e-8
+lr_final = 1e-6
 
 # the mini-epoch is very short and of fixed length (length = ctx_len * epoch_length_fixed tokens)
 n_epoch = 500
 epoch_length_fixed = (10000 // batch_size) * batch_size # feel free to increase it if you have lots of GPU
 
 # epoch_save_frequency 0 = never, 1 = every mini-epoch, 2 = every two mini-epochs, ...
-epoch_save_frequency = 10
+epoch_save_frequency = 1
 epoch_save_path = 'trained-'
 
 if EXPRESS_PILE_MODE:
@@ -146,7 +137,7 @@ if EXPRESS_PILE_MODE:
 ### misc stuffs ########################################################################################
 
 if LOAD_MODEL and EPOCH_BEGIN > 0: # we are not saving gradients, so let's have some warmup if we load a model
-    warmup_tokens = 50 * ctx_len * batch_size // NUM_GPUS
+    warmup_tokens = 50 * ctx_len * batch_size // 2
 else:
     warmup_tokens = 0
 
@@ -175,13 +166,8 @@ else:
 # Load data
 ########################################################################################################
 
-print(f'loading {datafile_encoding} data... ' + datafile)
-if datafile_encoding == 'binidx':
-    train_dataset = Dataset(MMapIndexedDataset(datafile), ctx_len, epoch_length_fixed)
-elif datafile_encoding == 'numpy':
-    train_dataset = Dataset(np.load(datafile).astype('int'), ctx_len, epoch_length_fixed)
-else:
-    train_dataset = Dataset(open(datafile, "r", encoding=datafile_encoding).read(), ctx_len, epoch_length_fixed)
+train_dataset = Dataset(pickle.load(open("/root/surya/Viva-with-LLMs/v1.1_data/train.pkl", "rb"))[1])
+test_dataset = Dataset(pickle.load(open("/root/surya/Viva-with-LLMs/v1.1_data/test.pkl", "rb"))[1])
 
 ########################################################################################################
 # Train model
@@ -277,4 +263,4 @@ if __name__ == '__main__':
 
         print(trainer._strategy.config)
     
-    trainer.run(m_cfg, train_dataset, None, tconf)
+    trainer.run(m_cfg, train_dataset, test_dataset, tconf)

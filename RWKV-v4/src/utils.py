@@ -15,60 +15,27 @@ import torch
 from torch.nn import functional as F
 from torch.utils.data import Dataset
 
+CTX_LEN = 2048
+
 class Dataset(Dataset):
-    def __init__(self, data, ctx_len, epoch_length_fixed):
-        self.ctx_len = ctx_len
-        self.epoch_length_fixed = epoch_length_fixed
+    def __init__(self, data):
         self.data = data
-
-        if 'MMapIndexedDataset' in str(type(self.data)):
-            self.vocab_size = int(os.environ['VOCAB_SIZE'])
-            print('current vocab size =', self.vocab_size, "(make sure it's correct)")
-            self.data_size = len(self.data._bin_buffer) // 2
-            print(f'data has {self.data_size} tokens.')
-        elif 'numpy' in str(type(self.data)):
-            self.vocab_size = int(os.environ['VOCAB_SIZE'])
-            print('current vocab size =', self.vocab_size, "(make sure it's correct)")
-            self.data_size = len(self.data)
-            print(f'data has {self.data_size} tokens.')
-        else:
-            print('building token list...', end=' ')
-            unique = sorted(list(set(data)))
-            self.vocab_size = len(unique)
-            # print()
-            # for u in unique:
-            #     print(u, end=' ')
-            # print('\n\n')
-
-            xx = 0
-            xxObj = {}
-            for u in unique:
-                xxObj[xx] = u
-                xx += 1
-            with open('vocab.json', "w", encoding="utf-16") as vocab_file:
-                vocab_file.write(json.dumps(xxObj, ensure_ascii=False))
-            self.data_size = len(self.data)
-            print('data has %d tokens, %d unique.' % (self.data_size, self.vocab_size))
-            self.stoi = {ch: i for i, ch in enumerate(unique)}
-            self.itos = {i: ch for i, ch in enumerate(unique)}
-
+        self.ctx_len = CTX_LEN
+        self.vocab_size = 50277
+        
     def __len__(self):
-        return self.epoch_length_fixed // NUM_GPUS
+        return len(self.data)
 
     def __getitem__(self, idx):
-        #
-        # we are cheating: pick a random spot in dataset
-        #
-        i = np.random.randint(0, self.data_size - (self.ctx_len + 1))
-        if 'MMapIndexedDataset' in str(type(self.data)):
-            dix = self.data.get(idx=0, offset=i, length=self.ctx_len + 1).astype(int)
-        elif 'numpy' in str(type(self.data)):
-            dix = self.data[i:i+self.ctx_len+1]
+        dix = self.data[idx]
+        if len(dix) <= self.ctx_len:
+            x = torch.tensor(dix[:-1], dtype=torch.long)
+            y = torch.tensor(dix[1:], dtype=torch.long)
         else:
-            dix = [self.stoi[s] for s in self.data[i:i+self.ctx_len+1]]
-        
-        x = torch.tensor(dix[:-1], dtype=torch.long)
-        y = torch.tensor(dix[1:], dtype=torch.long)
+            i = random.randint(0, len(dix)-self.ctx_len-1)
+            dix = dix[i:i+self.ctx_len+1]
+            x = torch.tensor(dix[:-1], dtype=torch.long)
+            y = torch.tensor(dix[1:], dtype=torch.long)
         return x, y
 
 

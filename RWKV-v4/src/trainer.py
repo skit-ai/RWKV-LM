@@ -25,6 +25,30 @@ else:
     torch.backends.cudnn.allow_tf32 = True
     torch.backends.cuda.matmul.allow_tf32 = True
 
+def pad_sequences(sequences, pad_idx=1):
+    max_size = min(max([len(s) for s in sequences]), 8196)
+    # max_size = max([len(s) for s in sequences])
+    new_sequences = []
+    for s in sequences:
+        pad_length = max_size - len(s)
+        if pad_length == 0:
+            s_ = s
+        elif pad_length > 0:
+            s_ = torch.full((max_size,), pad_idx, dtype=torch.long)
+            s_[-s.shape[0]:] = s
+            # s_ = torch.cat([torch.tensor([pad_idx] * pad_length, dtype=torch.long), s], dim=0)
+        elif pad_length < 0:
+            s_ = s[:max_size]
+        new_sequences.append(s_.unsqueeze(0))
+    return torch.cat(new_sequences, dim=0)
+
+def collate_fn(batch):
+    x = [i[0] for i in batch]
+    x = pad_sequences(x)
+    y = [i[1] for i in batch]
+    y = pad_sequences(y)
+    return x, y
+
 class TrainerConfig:
     batch_size = 64
     learning_rate = 4e-4
@@ -65,6 +89,11 @@ class Trainer(LightningLite):
                 m2 = torch.load(m_cfg.MODEL_NAME + '.pth', map_location='cpu')
                 model.load_state_dict(m2)
                 del m2
+            # else:
+            #     m2 = torch.load("/root/surya/Viva-with-LLMs/rwkv/RWKV-4-Pile-430M-20220808-8066.pth", map_location='cpu')
+            #     model.load_state_dict(m2)
+            #     del m2
+
         model.to(self.device)
 
         self.model = model
@@ -102,11 +131,11 @@ class Trainer(LightningLite):
             if config.num_workers > 0:
                 loader = DataLoader(data, shuffle=False, pin_memory=True,
                                     batch_size=config.batch_size // NUM_GPUS,
-                                    num_workers=config.num_workers)
+                                    num_workers=config.num_workers, collate_fn=collate_fn)
             else:
                 loader = DataLoader(data, shuffle=False,
                                     batch_size=config.batch_size // NUM_GPUS,
-                                    num_workers=config.num_workers)
+                                    num_workers=config.num_workers, collate_fn=collate_fn)
 
             pbar = tqdm(enumerate(loader), total=len(
                 loader), bar_format='{l_bar}{bar:10}{r_bar}{bar:-10b}') if is_train else enumerate(loader)
@@ -114,6 +143,7 @@ class Trainer(LightningLite):
             gc.collect()
             torch.cuda.empty_cache()
             
+            eval_loss = 0.0
             for it, (x, y) in pbar:
                 with torch.set_grad_enabled(is_train):
                     loss = model(x, y) # forward the model
@@ -123,6 +153,12 @@ class Trainer(LightningLite):
                 else:
                     all_loss = [loss.clone() for _ in range(NUM_GPUS)]
                     torch.distributed.all_gather(all_loss, loss)
+                if not is_train:
+                    now_loss = 0
+                    for gg in range(NUM_GPUS):
+                        now_loss += all_loss[gg].item()
+                    now_loss = now_loss / NUM_GPUS # report progress                    
+                    eval_loss += now_loss
 
                 if is_train:  # backprop and update the parameters
                     model.zero_grad()
@@ -170,11 +206,16 @@ class Trainer(LightningLite):
                         self.avg_loss = self.avg_loss * (1.0 - factor) + now_loss * factor
 
                     pbar.set_description(f"miniE {epoch+1+self.EPOCH_BEGIN} s {self.steps} prog {progress*100.0:.2f}% : ppl {math.exp(self.avg_loss):.6f} loss {self.avg_loss:.6f} lr {lr:e}")
+            if not is_train:
+                eval_loss /= it
+                if USE_WANDB and self.cuda_id == 0:
+                    wandb.log({"eval_loss": eval_loss}, step = self.steps)
 
         self.tokens = 0  # counter used for learning rate decay
         for epoch in range(99999999):
 
             run_epoch('train')
+            run_epoch('test')
             if math.isnan(self.avg_loss):
                 exit(0)
 
